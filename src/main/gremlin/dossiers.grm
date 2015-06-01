@@ -1,0 +1,206 @@
+import net.wagstrom.research.github.IndexNames
+import net.wagstrom.research.github.IdCols
+import net.wagstrom.research.github.EdgeType
+import net.wagstrom.research.github.VertexType
+import net.wagstrom.research.github.PropertyName
+
+// util
+def merge(Map a, Map b) {
+    //return (a + b).groupBy { it.id }.collect { it.value.collectEntries { it } }
+    // ghetto merge!
+    c = [:]
+    c.putAll(a)
+    c.putAll(b)
+    return c
+}
+
+def belongsToRepo(repo, e) {
+    // println("belongsToRepo: " + e + " " + e.label + " " + e.type)
+    switch (e.label) {
+        case null:
+            // kill null first as this is likely a vertex
+            break
+        case EdgeType.DISCUSSIONUSER:
+            return belongsToRepo(repo, e.inV.next())
+        case EdgeType.ISSUEASSIGNEE:
+            return belongsToRepo(repo, e.inV.next())
+        case EdgeType.ISSUECOMMENTOWNER:
+            return belongsToRepo(repo, e.inV.next())
+        case EdgeType.ISSUEEVENTACTOR:
+            return belongsToRepo(repo, e.inV.next())
+        case EdgeType.ISSUEOWNER:
+            return belongsToRepo(repo, e.inV.next())
+        case EdgeType.PULLREQUESTCOMMENTOWNER:
+            return belongsToRepo(repo, e.inV.next())
+        case EdgeType.PULLREQUESTISSUEUSER:
+            return belongsToRepo(repo, e.inV.next())
+        case EdgeType.PULLREQUESTOWNER:
+            return belongsToRepo(repo, e.inV.next())
+        case EdgeType.PULLREQUESTREVIEWCOMMENTOWNER:
+            return belongsToRepo(repo, e.inV.next())
+        case EdgeType.COMMITAUTHOR:
+            return belongsToRepo(repo, e.outV.next())
+        case EdgeType.COMMITTER:
+            return belongsToRepo(repo, e.outV.next())
+    }
+    switch (e.type) {
+        case null:
+            // kill null first as this is likely an edge
+            break
+        // discussion_user
+        case VertexType.COMMENT:
+            // comment -> issue -> repository
+            // println("Returning: " + e.in(EdgeType.ISSUECOMMENT).in(EdgeType.ISSUE).next() + " " + repo)
+            return e.in(EdgeType.ISSUECOMMENT).in(EdgeType.ISSUE).next() == repo
+        case VertexType.COMMIT:
+            // commit -> repository
+            // println("Returning: " + e.out(EdgeType.REPOSITORY).next() + " " + repo)
+            return e.out(EdgeType.REPOSITORY).next() == repo
+        case VertexType.PULLREQUESTREVIEWCOMMENT:
+            // really not sure how to handle this...
+            return false
+        // issue_comment_owner
+        // - comment
+        // issue_event_actor
+        case VertexType.ISSUE_EVENT:
+            // issue event -> issue -> repository
+            // println("Returning: " + e.in(EdgeType.ISSUEEVENT).in(EdgeType.ISSUE).next() + " " + repo)
+        
+            return e.in("ISSUE_EVENT").in("ISSUE").next() == repo
+        case VertexType.ISSUE:
+            // issue -> repository
+            // println("Returning: " + e.in(EdgeType.ISSUE).next() + " " + repo)
+        
+            return e.in("ISSUE").next() == repo
+        case VertexType.PULLREQUEST:
+            // pullrequest -> repository
+            // println("Returning: " + e.in(EdgeType.PULLREQUEST).next() + " " + repo)
+        
+            return e.in("PULLREQUEST").next() == repo
+        // issue_event
+        // - issue_event
+        // git_user
+        // - commit
+    }
+    println("SHOULD NEVER REACH HERE!")
+    println("belongsToRepo: " + e + " " + e.label + " " + e.type)
+    return false
+}
+
+def dossierContributionType(Edge e) {
+    if (e.label == EdgeType.ISSUEEVENTACTOR) {
+        return e.inV.event.next()
+    }
+    return e.label
+}
+
+def getDossier(IndexableGraph g, Vertex repo, Vertex user, Set communityUsers) {
+
+// For some reason this code seems to stop abnormally soon. I'm thinking it's a
+// bug in gremlin or pipes. Use the new code below instead.
+//    // need to find a groovy equivalent of apply to clean this up
+//    gh_dossier = user.bothE(EdgeType.DISCUSSIONUSER, \
+//                            EdgeType.ISSUEASSIGNEE, \
+//                            EdgeType.ISSUECOMMENTOWNER, \
+//                            EdgeType.ISSUEEVENTACTOR, \
+//                            EdgeType.ISSUEOWNER, \
+//                            EdgeType.PULLREQUESTCOMMENTOWNER, \
+//                            EdgeType.PULLREQUESTISSUEUSER, \
+//                            EdgeType.PULLREQUESTOWNER, \
+//                            EdgeType.PULLREQUESTREVIEWCOMMENTOWNER). \
+//                      filter{ belongsToRepo(repo, it) }. \
+//                      groupCount{it.label}.cap.next()
+
+    gh_dossier = [:]
+    gitHubEdgeTypes = [EdgeType.DISCUSSIONUSER, \
+                       EdgeType.ISSUEASSIGNEE, \
+                       EdgeType.ISSUECOMMENTOWNER, \
+                       EdgeType.ISSUEEVENTACTOR, \
+                       EdgeType.ISSUEOWNER, \
+                       EdgeType.PULLREQUESTCOMMENTOWNER, \
+                       EdgeType.PULLREQUESTISSUEUSER, \
+                       EdgeType.PULLREQUESTOWNER, \
+                       EdgeType.PULLREQUESTREVIEWCOMMENTOWNER]
+    for (et in gitHubEdgeTypes) {
+        //user.bothE(et).filter{belongsToRepo(repo, it)}.label.groupCount(gh_dossier).iterate()
+        groups = user.bothE(et).filter{belongsToRepo(repo, it)}.collect{dossierContributionType(it)}.countBy{it}
+        gh_dossier = merge(gh_dossier, groups)
+    }
+    if (communityUsers != null) {
+        gh_dossier["communityfollowers"] = user.out(EdgeType.FOLLOWER).toSet().intersect(communityUsers).size()
+    }
+
+    g_dossier = [:]
+    gitEdgeTypes = [EdgeType.COMMITTER, EdgeType.COMMITAUTHOR]
+    allGitAccounts = Helpers.getAllGitAccounts(g, user)
+    for (et in gitEdgeTypes) {
+        //allGitAccounts._().inE(et).filter{belongsToRepo(repo, it)}. \
+            //label.groupCount(g_dossier).iterate()
+        groups = allGitAccounts._().inE(et).filter{belongsToRepo(repo, it)}. \
+            collect{dossierContributionType(it)}.countBy{it}
+        g_dossier = merge(g_dossier, groups)
+    }
+//    g_dossier = Helpers.getAllGitAccounts(g, user). \
+//                    //_().in(EdgeType.COMMITAUTHOR, \
+//                           //EdgeType.COMMITTER). \
+//                    _().inE(EdgeType.COMMITTER). \
+//                    filter{ belongsToRepo(repo, it) }. \
+//                    groupCount{it.label}.cap.next()
+    return merge(gh_dossier, g_dossier)
+}
+
+def getDossierAsCSV(Vertex repo, Vertex user, Map dossier) {
+    return [repo.fullname, \
+            user.login, \
+            "\"" + user.email + "\"", \
+            //user.gravatarId, \
+            //dossier[EdgeType.DISCUSSIONUSER] ?: 0, \
+            dossier[EdgeType.ISSUEASSIGNEE] ?: 0, \
+            dossier[EdgeType.ISSUECOMMENTOWNER] ?: 0, \
+            //dossier[EdgeType.ISSUEEVENTACTOR] ?: 0, \
+            dossier["closed"] ?: 0, \
+            dossier["reopened"] ?: 0, \
+            dossier["subscribed"] ?: 0, \
+            dossier["merged"] ?: 0, \
+            dossier["referenced"] ?: 0, \
+            dossier["mentioned"] ?: 0, \
+            dossier["assigned"] ?: 0, \
+            dossier[EdgeType.ISSUEOWNER] ?: 0, \
+            dossier[EdgeType.PULLREQUESTCOMMENTOWNER] ?: 0, \
+            //dossier[EdgeType.PULLREQUESTISSUEUSER] ?: 0, \
+            //dossier[EdgeType.PULLREQUESTOWNER] ?: 0, \
+            dossier[EdgeType.PULLREQUESTREVIEWCOMMENTOWNER] ?: 0, \
+            dossier["communityfollowers"] ?: 0, \
+            dossier[EdgeType.COMMITTER] ?: 0, \
+            dossier[EdgeType.COMMITAUTHOR] ?: 0 ].join(",")
+}
+
+configMap = ["READ_ONLY": "true"]
+g = new Neo4jGraph(Defaults.DBPATH, configMap)
+projects = RailsHelpers.readProjectNames("rails.data/rails.db.20120505.projects.txt")
+
+interestUsers = new HashSet()
+repoUsers = RailsHelpers.readUserNames("rails.data/rails.db.20120505.people.txt")
+repoUsers.keySet().each{interestUsers.addAll(repoUsers[it])}
+
+// header
+// TODO clean this up, need to unify all of the points where these fields are referenced
+println "repository,username,email,issueassignee,issuecommentowner,closed,reopened,subscribed,merged,referenced,mentioned,assigned,issueowner,pullrequestcommentowner,pullrequestreviewcommentowner,communityfollowers,committer,commitauthor"
+for (project in projects) {
+    repo = g.idx(IndexNames.REPOSITORY).get(IdCols.REPOSITORY, project).next()
+    users = Helpers.getAllRepositoryUsers(repo)
+    // in the future, it may be nice to look at all the users, for now
+    // we only look at the interesting users who are affiliated with this
+    // project
+    for (user in users._().filter{interestUsers.contains(it.login)}) {
+        if (user instanceof Vertex) {
+            println getDossierAsCSV(repo, user, getDossier(g, repo, user, users))
+        } else {
+            println "------invalid"
+            println user.class
+        }
+    }
+}
+
+g.shutdown()
+

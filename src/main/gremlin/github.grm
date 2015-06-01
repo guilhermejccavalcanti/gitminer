@@ -1,0 +1,55 @@
+def DBPATH="/users/pwagstro/Documents/workspace/github/graph.20120125.db"
+typeidx = g.idx("type-idx")
+users = []; typeidx[["type": "USER"]].fill(users); null
+repositories = []; typeidx[["type": "REPOSITORY"]].fill(repositories); null
+
+
+def getIndex(g, indexname) {
+    for (idx in g.indices) {
+        if (idx.indexName == indexname) {
+            return idx
+        }
+    }
+}
+
+def getAllIndices(g) {
+    rv = [:]
+    for (idx in g.indices) {
+        rv[idx.indexName] = idx
+    }
+    return rv
+}
+
+def exportFollowerSubgraph(users, outfile) {
+    to = new TinkerGraph()
+    System.out.println("processing users")
+    for (vertex in users) {
+        System.out.println("user: " + vertex["login"])
+        toVertex = to.addVertex(vertex.getId())
+        ElementHelper.copyProperties(vertex, toVertex)
+    }
+
+    System.out.println("processing edges")
+    for (vertex in users) {
+        System.out.println("edges for user: " + vertex["login"])
+        for (edge in vertex.outE("FOLLOWER")) {
+            if (edge == null) continue;
+            System.out.println("edge: " + edge)
+            System.out.println("edge: " + vertex["login"] + " => " + edge.getInVertex()["login"])
+            toEdge = to.addEdge(edge.getId(), to.v(vertex.getId()),
+                to.v(edge.getInVertex().getId()), edge.getLabel())
+            ElementHelper.copyProperties(edge, toEdge)
+        }
+    }
+
+    System.out.println("Writing graphml file")
+    GraphMLWriter writer = new GraphMLWriter()
+    writer.outputGraph(to, new FileOutputStream("follower.graphml"))
+}
+
+g = new Neo4jGraph(DBPATH)
+indices = getAllIndices(g)
+users = []
+indices["type-idx"].get("type", "USER") >> users
+exportFollowerSubgraph(users, "followers.graphml")
+g.shutdown()

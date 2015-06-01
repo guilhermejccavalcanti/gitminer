@@ -1,0 +1,131 @@
+/**
+ * build a network of mentions for a project
+ */
+
+import net.wagstrom.research.github.IndexNames
+import net.wagstrom.research.github.IdCols
+import net.wagstrom.research.github.EdgeType
+g = new Neo4jGraph(Defaults.DBPATH)
+
+g2 = new TinkerGraph()
+people = [:].withDefault{g2.addVertex(["type": "USER", "name": it])}
+issues = [:].withDefault{g2.addVertex(["type": "ISSUE", "name": it, "project": it.split("/")[0]])}
+
+g3 = new TinkerGraph()
+people2 = [:].withDefault{g3.addVertex(["type": "USER", "name": it])}
+
+repoidx = g.idx(IndexNames.REPOSITORY)
+// iterate over each of the projects
+for (projname in Defaults.PROJECTS) {
+    proj = repoidx.get(IdCols.REPOSITORY, projname).next()
+
+    // iterate over each of the issues with "mentioned" links
+    for (issue in proj.out(EdgeType.ISSUE).out(EdgeType.ISSUEEVENT).filter{it.event=="mentioned"}.back(2)) {
+        println("issue: " + issue)
+        printf("Issue: %d\n", issue.gitHubId)
+        for (mentioned in issue.out(EdgeType.ISSUEEVENT).filter{it.event=="mentioned"}) {
+            mentionedDate = Helpers.timestampToDate(mentioned.createdAt)
+
+            println("Mentioned: " + mentioned)
+            if (mentioned.in(EdgeType.ISSUEEVENTACTOR).count() == 0) {
+                println("XXX: Naked mentioned object for issue: " + issue.issue_id)
+                continue
+            }
+
+            printf("Person: %s %s\n", mentioned.in(EdgeType.ISSUEEVENTACTOR).login.next(), mentioned.createdAt)
+            println("pants")
+            person = people2[mentioned.in(EdgeType.ISSUEEVENTACTOR).login.next()]
+
+            println("blurp")
+            if (issue.createdAt == mentioned.createdAt && issue.body != null && issue.body.indexOf(person.name) != -1) {
+                person2 = people2[issue.in(EdgeType.ISSUEOWNER).login.next()]
+                g3.addEdge(person2, person, "MENTIONED")
+            } else if (issue.out(EdgeType.ISSUECOMMENT).filter{it.createdAt == mentioned.createdAt}.in(EdgeType.ISSUECOMMENTOWNER).login.count() != 0) {
+                println("issue comments")
+                person2 = people2[issue.out(EdgeType.ISSUECOMMENT).filter{it.createdAt==mentioned.createdAt}.in(EdgeType.ISSUECOMMENTOWNER).login.next()]
+                println("found it!")
+                g3.addEdge(person2, person, "MENTIONED")
+            } else if (proj.out(EdgeType.PULLREQUEST).filter{it.pullrequest_id == issue.issue_id}.count() > 0) {
+                println("pull request")
+                // printf("pullrequest count: %d\n", proj.out(EdgeType.PULLREQUEST).filter{it.number == issue.number}.count())
+                pr = proj.out(EdgeType.PULLREQUEST).filter{it.pullrequest_id == issue.issue_id}.next()
+                person2 = null;
+                printf("pull request: %s\n", pr.pullrequest_id)
+                // pull requests can be tricky. People can be mentioned in several ways:
+                // the body of the PULLREQUEST
+                // in an associated PULLREQUEST_DISCUSSION
+                // however, the dates don't always line up. Yeah, this sucks, so we need to sometimes brute force it.
+                if (pr.createdAt == mentioned.createdAt) {
+                    person2 = people2[pr.in(EdgeType.PULLREQUESTOWNER).login.next()]
+                } else if (pr.out(EdgeType.PULLREQUESTDISCUSSION).filter{it.createdAt==mentioned.createdAt}.in(EdgeType.DISCUSSIONUSER).count() > 0) {
+                    println "Digging for discussion"
+                    person2 = people2[pr.out(EdgeType.PULLREQUESTDISCUSSION).filter{it.createdAt==mentioned.createdAt}.in(EdgeType.DISCUSSIONUSER).login.next()]
+                } else {
+                    searchString = "@" + person.name
+                    println "Ughh...Abusive search for: " + searchString
+                    if (pr.body != null && pr.body.indexOf(searchString) != -1) {
+                        pullrequestDate = Helpers.timestampToDate(pr.createdAt)
+                        if (Helpers.dateDifference(pullrequestDate, mentionedDate) < Defaults.MAX_DELTA) {
+                            person2 = people2[pr.in(EdgeType.PULLREQUESTOWNER).login.next()]
+                        }
+                    }
+                    if (person2 == null) {
+                        for (discussion in pr.out(EdgeType.PULLREQUESTDISCUSSION)) {
+                            println(discussion)
+                            if (discussion.message != null && discussion.message.indexOf(searchString) != -1) {
+                                println("a")
+                                discussionDate = Helpers.timestampToDate(discussion.commitedDate)
+                                println("a1")
+                                if (Math.abs(Helpers.dateDifference(discussionDate, mentionedDate)) < Defaults.MAX_DELTA) {
+                                    println("a2")
+                                    person2 = people2[dicsussion.in("DISCUSSION_USER").login.next()]
+                                }
+                            } else if (discussion.body != null && discussion.body.indexOf(searchString) != -1) {
+                                println("b")
+                                println("b1")
+                                discussionDate = Helpers.timestampToDate(discussion.createdAt)
+                                println discussionDate.metaClass
+                                if (Math.abs(Helpers.dateDifference(discussionDate, mentionedDate)) < Defaults.MAX_DELTA) {
+                                    println("b2")
+                                    person2 = people2[pr.in(EdgeType.PULLREQUESTOWNER).login.next()]
+                                }
+                                println("b3")
+                            }
+                            println("discussion checked")
+                        }
+                    }
+                    println("Abusive search completed")
+                }
+                if (person2 != null) {
+                    g3.addEdge(person2, person, "MENTIONED")
+                } else {
+                    println("XXXX: unable to find someone within time/date boundaries")
+                }
+            } else if (issue.out(EdgeType.ISSUECOMMENT).filter{Math.abs(Helpers.dateDifference(Helpers.timestampToDate(it.createdAt), mentionedDate)) < Defaults.MAX_DELTA}.in(EdgeType.ISSUECOMMENTOWNER).login.count() != 0) {
+                println("issue comments (fuzzy!")
+                person2 = people2[issue.out(EdgeType.ISSUECOMMENT).filter{Math.abs(Helpers.dateDifference(Helpers.timestampToDate(it.createdAt), mentionedDate)) < Defaults.MAX_DELTA}.in(EdgeType.ISSUECOMMENTOWNER).login.next()]
+                println("found it!")
+                g3.addEdge(person2, person, "MENTIONED")
+            } else {
+                println("ARGHGHGH!")
+                printf("XXX Issue: %s - Unable to find discussion\n", issue.issue_id);
+            }
+        }
+
+        println("CHECK!")
+        v1 = issues[issue.issue_id]
+        println("Found Issue!")
+        for (person in issue._().out(EdgeType.ISSUEEVENT).filter{it.event=="mentioned"}.in(EdgeType.ISSUEEVENTACTOR)) {
+            println("Person: " + person)
+            v2 = people[person.login]
+            g2.addEdge(v1,v2,"MENTIONED")
+        }
+        println("loop!")
+    }
+    print("next project!")
+}
+g2.saveGraphML("mentioned_issues.graphml")
+g3.saveGraphML("mentioned_people.graphml")
+g.shutdown()
+g2.shutdown()
+g3.shutdown()
